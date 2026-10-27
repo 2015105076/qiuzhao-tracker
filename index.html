@@ -4,18 +4,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>投递簿 · 秋招投递手帐</title>
-  <meta name="description" content="一本安静、清晰的秋招投递手帐。记录投递时间、企业、岗位与状态，支持 Excel 批量导入，让每一次投递都有迹可循。">
+  <meta name="description" content="一本安静、清晰的秋招投递手帐。记录投递时间、企业、岗位与状态，支持 Excel 批量导入与 GitHub 私有云同步，让每一次投递都有迹可循。">
   <meta name="theme-color" content="#f4f0e7">
   <meta property="og:type" content="website">
   <meta property="og:title" content="投递簿 · 秋招投递手帐">
-  <meta property="og:description" content="把公司、岗位与进度收进同一本手帐，支持 Excel 批量导入，让每一次投递都有迹可循。">
+  <meta property="og:description" content="把公司、岗位与进度收进同一本手帐，支持 Excel 批量导入与 GitHub 私有云同步，让每一次投递都有迹可循。">
   <meta property="og:url" content="https://2015105076.github.io/qiuzhao-tracker/">
   <meta property="og:image" content="https://2015105076.github.io/qiuzhao-tracker/assets/og-cover.jpg">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="投递簿 · 秋招投递手帐">
-  <meta name="twitter:description" content="把公司、岗位与进度收进同一本手帐，支持 Excel 批量导入，让每一次投递都有迹可循。">
+  <meta name="twitter:description" content="把公司、岗位与进度收进同一本手帐，支持 Excel 批量导入与 GitHub 私有云同步，让每一次投递都有迹可循。">
   <meta name="twitter:image" content="https://2015105076.github.io/qiuzhao-tracker/assets/og-cover.jpg">
   <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
   <link rel="apple-touch-icon" href="assets/favicon.svg">
@@ -48,6 +48,12 @@
             <span>数据</span>
           </button>
           <div class="dropdown-menu" id="data-menu" role="menu" hidden>
+            <button type="button" role="menuitem" data-data-action="github-sync">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h10a4 4 0 0 0 .7-7.9A6 6 0 0 0 6.1 9.3 4.6 4.6 0 0 0 7 18Z"/><path d="m9 13 3 3 3-3M12 16V9"/></svg>
+              GitHub 云同步
+              <span class="menu-sync-state" id="sync-menu-state">未连接</span>
+            </button>
+            <div class="dropdown-divider"></div>
             <p class="dropdown-label">批量导入</p>
             <button type="button" role="menuitem" data-data-action="import-excel">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/><path d="m15.5 12.5 2 2-2 2"/></svg>
@@ -58,7 +64,7 @@
               下载 Excel 模板
             </button>
             <div class="dropdown-divider"></div>
-            <p class="dropdown-label">本地数据</p>
+            <p class="dropdown-label">数据备份</p>
             <button type="button" role="menuitem" data-data-action="export-csv">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v3h16v-3"/></svg>
               导出 CSV 表格
@@ -72,7 +78,7 @@
               导入 JSON 备份
             </button>
             <div class="dropdown-divider"></div>
-            <p class="dropdown-note">数据只保存在当前浏览器，不会上传。</p>
+            <p class="dropdown-note">默认保存在本机；开启云同步后写入你的私有 GitHub 仓库。</p>
           </div>
         </div>
         <button class="btn btn-primary btn-header" type="button" data-open-add>
@@ -102,7 +108,7 @@
         </div>
         <p class="hero-assurance">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.5 2.9 8.2 7 10 4.1-1.8 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/></svg>
-          无需注册，数据仅存本地
+          无需注册，默认仅存本地
         </p>
       </div>
 
@@ -204,7 +210,10 @@
             <kbd class="search-kbd">/</kbd>
           </div>
           <div class="toolbar-actions">
-            <span class="local-badge"><span class="local-dot"></span>本地存储</span>
+            <button type="button" class="sync-badge" id="sync-badge" data-open-sync title="配置 GitHub 云同步" aria-label="配置 GitHub 云同步">
+              <span class="sync-badge-dot" aria-hidden="true"></span>
+              <span id="sync-badge-text">仅本地存储</span>
+            </button>
             <button type="button" class="btn btn-outline btn-sm import-trigger" data-open-import>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>
               导入 Excel
@@ -245,7 +254,7 @@
       </div>
       <p class="footer-privacy">
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
-        所有数据仅保存在当前浏览器
+        默认保存在本机 · 可选 GitHub 私有同步
       </p>
       <p class="footer-meta">为秋招而作 · <a href="https://github.com/2015105076/qiuzhao-tracker" target="_blank" rel="noreferrer">GitHub</a></p>
     </div>
@@ -408,6 +417,116 @@
     </div>
   </dialog>
 
+
+  <dialog class="sync-dialog" id="sync-dialog" aria-labelledby="sync-title">
+    <div class="sync-shell">
+      <div class="dialog-head">
+        <div>
+          <p class="section-kicker">GITHUB CLOUD SYNC</p>
+          <h2 id="sync-title">GitHub 云同步</h2>
+        </div>
+        <button type="button" class="icon-btn dialog-close" data-close-sync aria-label="关闭云同步设置">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+
+      <div class="sync-body">
+        <div class="sync-status-card" id="sync-status-card" data-state="local" role="status" aria-live="polite">
+          <div class="sync-status-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M7 18h10a4 4 0 0 0 .7-7.9A6 6 0 0 0 6.1 9.3 4.6 4.6 0 0 0 7 18Z"/><path d="M12 15V8m0 0-2 2m2-2 2 2"/></svg>
+          </div>
+          <div class="sync-status-copy">
+            <strong id="sync-status-title">仅保存在本机</strong>
+            <p id="sync-status-desc">连接一个私有 GitHub 仓库，即可在不同设备同步投递记录。</p>
+          </div>
+          <span class="sync-status-pill" id="sync-status-pill">未连接</span>
+        </div>
+
+        <div class="sync-error" id="sync-error" role="alert" hidden></div>
+
+        <section class="sync-connected" id="sync-connected" hidden>
+          <div class="sync-info-grid">
+            <div><span>私有仓库</span><strong id="sync-connected-repo">—</strong></div>
+            <div><span>数据文件</span><strong id="sync-connected-path">—</strong></div>
+            <div><span>同步分支</span><strong id="sync-connected-branch">—</strong></div>
+            <div><span>上次同步</span><strong id="sync-connected-time">尚未同步</strong></div>
+          </div>
+          <label class="sync-auto">
+            <input type="checkbox" id="sync-auto">
+            <span>自动同步这台设备上的改动</span>
+          </label>
+          <div class="sync-connected-actions">
+            <button type="button" class="btn btn-primary" id="sync-now">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7h-5V2"/><path d="M4 17h5v5"/><path d="M5.5 9a7.5 7.5 0 0 1 12.7-2L20 9M4 15l1.8 2A7.5 7.5 0 0 0 18.5 15"/></svg>
+              立即同步
+            </button>
+            <button type="button" class="btn btn-outline" id="sync-edit">修改连接设置</button>
+            <button type="button" class="btn btn-danger-text" id="sync-disconnect">断开连接</button>
+          </div>
+          <p class="sync-hint">打开页面、切回标签页或修改数据后，会自动与 GitHub 合并同步。不同设备之间的改动按更新时间合并。</p>
+        </section>
+
+        <section class="sync-setup" id="sync-setup">
+          <div class="sync-intro">
+            <h3>把数据存进你的私有仓库</h3>
+            <p>建议使用一个仅授权该仓库的 Fine-grained Token。投递数据以 JSON 文件保存，不会进入公开站点。</p>
+          </div>
+
+          <details class="sync-help" id="sync-help">
+            <summary>第一次配置？查看 4 步说明</summary>
+            <ol>
+              <li>打开 <a id="sync-repo-link" href="https://github.com/2015105076/qiuzhao-tracker-data" target="_blank" rel="noreferrer">私有数据仓库</a>。默认仓库已经创建好，只存放同步数据；也可以换成你自己的私有仓库。</li>
+              <li>前往 <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noreferrer">GitHub Token 设置</a>，新建 Fine-grained token，Resource owner 选择你的账号。</li>
+              <li>Repository access 只选择 <code id="sync-help-repo">2015105076/qiuzhao-tracker-data</code>；Permissions → Contents 设为 <strong>Read and write</strong>。</li>
+              <li>生成后粘贴到下方，点击「连接并同步」。同一 Token 只需在每台设备配置一次。</li>
+            </ol>
+          </details>
+
+          <form id="sync-form" novalidate>
+            <div class="sync-form-grid">
+              <div class="field field-wide">
+                <label for="sync-repo">私有仓库 <span class="required">*</span></label>
+                <input id="sync-repo" name="repo" type="text" maxlength="120" placeholder="owner/repository" autocomplete="off" spellcheck="false" required>
+              </div>
+              <div class="field">
+                <label for="sync-branch">分支</label>
+                <input id="sync-branch" name="branch" type="text" maxlength="80" placeholder="main" autocomplete="off" spellcheck="false">
+              </div>
+              <div class="field">
+                <label for="sync-path">数据文件</label>
+                <input id="sync-path" name="path" type="text" maxlength="120" placeholder="applications.json" autocomplete="off" spellcheck="false">
+              </div>
+              <div class="field field-wide">
+                <div class="label-row">
+                  <label for="sync-token">Fine-grained Token <span class="required">*</span></label>
+                  <button type="button" class="token-toggle" id="sync-token-toggle" aria-label="显示 Token">显示</button>
+                </div>
+                <input id="sync-token" name="token" type="password" maxlength="255" placeholder="github_pat_..." autocomplete="off" spellcheck="false" required>
+                <p class="sync-field-hint" id="sync-token-hint">仅需对该仓库的 Contents 授予 Read and write 权限。</p>
+              </div>
+            </div>
+            <div class="sync-inline-error" id="sync-form-error" role="alert" hidden></div>
+            <label class="sync-auto">
+              <input type="checkbox" id="sync-auto-setup" checked>
+              <span>在这台设备上自动同步</span>
+            </label>
+            <p class="sync-security">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+              Token 只保存在当前浏览器，不会出现在公开站点或同步文件中。
+            </p>
+          </form>
+        </section>
+      </div>
+
+      <div class="dialog-foot sync-foot">
+        <span class="sync-foot-note">私有仓库 · 数据由 GitHub 保管</span>
+        <div class="dialog-actions">
+          <button type="button" class="btn btn-quiet" id="sync-cancel">取消</button>
+          <button type="button" class="btn btn-primary" id="sync-submit">连接并同步</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
   <dialog class="confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-title">
     <div class="confirm-icon" aria-hidden="true">
       <svg viewBox="0 0 24 24"><path d="M12 8v5M12 17h.01"/><path d="M10.3 3.9 2.7 17a2 2 0 0 0 1.7 3h15.2a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>

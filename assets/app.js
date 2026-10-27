@@ -4,6 +4,14 @@
 
   const STORAGE_KEY = "qiuzhao-tracker:v1";
   const VIEW_KEY = "qiuzhao-tracker:view";
+  const SYNC_CONFIG_KEY = "qiuzhao-tracker:github-sync";
+  const SYNC_API_BASE = "https://api.github.com";
+  const SYNC_DEFAULT_REPO = "2015105076/qiuzhao-tracker-data";
+  const SYNC_DEFAULT_BRANCH = "main";
+  const SYNC_DEFAULT_PATH = "applications.json";
+  const SYNC_DEBOUNCE_MS = 1200;
+  const SYNC_FOCUS_THROTTLE_MS = 30000;
+  const TOMBSTONE_MAX_AGE_MS = 180 * 24 * 60 * 60 * 1000;
 
   const STATUSES = [
     { key: "applied", label: "已投递", color: "#b56a4a" },
@@ -86,6 +94,39 @@
     listCount: document.getElementById("list-count"),
     dataMenuButton: document.getElementById("data-menu-btn"),
     dataMenu: document.getElementById("data-menu"),
+    syncBadge: document.getElementById("sync-badge"),
+    syncBadgeText: document.getElementById("sync-badge-text"),
+    syncMenuState: document.getElementById("sync-menu-state"),
+    syncDialog: document.getElementById("sync-dialog"),
+    syncStatusCard: document.getElementById("sync-status-card"),
+    syncStatusTitle: document.getElementById("sync-status-title"),
+    syncStatusDesc: document.getElementById("sync-status-desc"),
+    syncStatusPill: document.getElementById("sync-status-pill"),
+    syncError: document.getElementById("sync-error"),
+    syncFormError: document.getElementById("sync-form-error"),
+    syncConnected: document.getElementById("sync-connected"),
+    syncConnectedRepo: document.getElementById("sync-connected-repo"),
+    syncConnectedPath: document.getElementById("sync-connected-path"),
+    syncConnectedBranch: document.getElementById("sync-connected-branch"),
+    syncConnectedTime: document.getElementById("sync-connected-time"),
+    syncAuto: document.getElementById("sync-auto"),
+    syncAutoSetup: document.getElementById("sync-auto-setup"),
+    syncNow: document.getElementById("sync-now"),
+    syncEdit: document.getElementById("sync-edit"),
+    syncDisconnect: document.getElementById("sync-disconnect"),
+    syncSetup: document.getElementById("sync-setup"),
+    syncHelp: document.getElementById("sync-help"),
+    syncForm: document.getElementById("sync-form"),
+    syncRepo: document.getElementById("sync-repo"),
+    syncBranch: document.getElementById("sync-branch"),
+    syncPath: document.getElementById("sync-path"),
+    syncToken: document.getElementById("sync-token"),
+    syncTokenHint: document.getElementById("sync-token-hint"),
+    syncTokenToggle: document.getElementById("sync-token-toggle"),
+    syncRepoLink: document.getElementById("sync-repo-link"),
+    syncHelpRepo: document.getElementById("sync-help-repo"),
+    syncSubmit: document.getElementById("sync-submit"),
+    syncCancel: document.getElementById("sync-cancel"),
     importDialog: document.getElementById("import-dialog"),
     importFile: document.getElementById("import-file"),
     excelFile: document.getElementById("excel-file"),
@@ -109,12 +150,31 @@
 
   const state = {
     applications: [],
+    deletions: {},
+    documentUpdatedAt: null,
     filter: "all",
     search: "",
     view: "list",
     editingId: null,
     pendingDeleteId: null,
     storageWarningShown: false
+  };
+
+  const syncState = {
+    config: null,
+    status: "local",
+    error: "",
+    formError: "",
+    dirty: false,
+    changeVersion: 0,
+    lastSyncAt: 0,
+    lastAttemptAt: 0,
+    editing: false,
+    inFlight: false,
+    pending: false,
+    timer: null,
+    syncPromise: null,
+    notifiedError: false
   };
 
   const importState = {
@@ -293,36 +353,95 @@
     });
   }
 
-  function loadApplications() {
+  function sanitizeDeletions(raw) {
+    const result = {};
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return result;
+    Object.keys(raw).forEach((id) => {
+      const timestamp = raw[id];
+      const parsed = Date.parse(timestamp);
+      if (typeof id === "string" && id && !Number.isNaN(parsed)) {
+        result[id] = new Date(parsed).toISOString();
+      }
+    });
+    return result;
+  }
+
+  function pruneDeletions(deletions) {
+    const cutoff = Date.now() - TOMBSTONE_MAX_AGE_MS;
+    const result = {};
+    Object.keys(deletions || {}).forEach((id) => {
+      const timestamp = Date.parse(deletions[id]);
+      if (!Number.isNaN(timestamp) && timestamp >= cutoff) {
+        result[id] = new Date(timestamp).toISOString();
+      }
+    });
+    return result;
+  }
+
+  function loadLocalDocument() {
     try {
       const stored = window.localStorage.getItem(STORAGE_KEY);
-      if (!stored) return [];
+      if (!stored) {
+        return { applications: [], deletions: {}, updatedAt: null };
+      }
       const parsed = JSON.parse(stored);
-      const list = Array.isArray(parsed) ? parsed : parsed && Array.isArray(parsed.applications) ? parsed.applications : [];
-      return dedupeIds(list.map(normalizeApplication).filter(Boolean));
+      const list = Array.isArray(parsed)
+        ? parsed
+        : parsed && Array.isArray(parsed.applications)
+          ? parsed.applications
+          : [];
+      const updatedAt =
+        !Array.isArray(parsed) &&
+        parsed &&
+        !Number.isNaN(Date.parse(parsed.updatedAt))
+          ? new Date(parsed.updatedAt).toISOString()
+          : null;
+      return {
+        applications: dedupeIds(list.map(normalizeApplication).filter(Boolean)),
+        deletions: pruneDeletions(
+          sanitizeDeletions(!Array.isArray(parsed) && parsed ? parsed.deletions : {})
+        ),
+        updatedAt: updatedAt
+      };
     } catch (error) {
-      return [];
+      return { applications: [], deletions: {}, updatedAt: null };
     }
   }
 
-  function saveApplications() {
+  function saveApplications(options) {
+    const settings = options || {};
+    const touch = settings.touch !== false;
+    const now = new Date().toISOString();
+    if (touch || !state.documentUpdatedAt) {
+      state.documentUpdatedAt = now;
+    }
+    state.deletions = pruneDeletions(state.deletions);
+
     try {
       window.localStorage.setItem(
         STORAGE_KEY,
         JSON.stringify({
-          version: 1,
-          updatedAt: new Date().toISOString(),
-          applications: state.applications
+          version: 2,
+          updatedAt: state.documentUpdatedAt,
+          applications: state.applications,
+          deletions: state.deletions
         })
       );
-      return true;
     } catch (error) {
       if (!state.storageWarningShown) {
         state.storageWarningShown = true;
         showToast("浏览器本地存储不可用，记录可能无法保留。", "error");
       }
-      return false;
     }
+
+    if (touch && !settings.skipCloudSync) {
+      onLocalDataChanged();
+    }
+    return true;
+  }
+
+  function clearDeletionMark(id) {
+    if (id && state.deletions[id]) delete state.deletions[id];
   }
 
   function sortApplications(applications) {
@@ -891,6 +1010,7 @@
       ensureSavedApplicationVisible(application);
     }
 
+    clearDeletionMark(application.id);
     saveApplications();
     closeApplicationDialog();
     render();
@@ -925,6 +1045,7 @@
     if (!id) return;
     const application = state.applications.find((item) => item.id === id);
     state.applications = state.applications.filter((item) => item.id !== id);
+    state.deletions[id] = new Date().toISOString();
     state.pendingDeleteId = null;
     saveApplications();
     if (refs.confirmDialog.open) refs.confirmDialog.close();
@@ -943,6 +1064,7 @@
 
     application.status = newStatus;
     application.updatedAt = new Date().toISOString();
+    clearDeletionMark(application.id);
     saveApplications();
 
     if (settings.fromBoard) {
@@ -1094,6 +1216,7 @@
             state.applications.push(incoming);
             added += 1;
           }
+          clearDeletionMark(incoming.id);
         });
         saveApplications();
         render();
@@ -1686,6 +1809,7 @@
     ).filter(Boolean);
 
     state.applications.push.apply(state.applications, imported);
+    imported.forEach((application) => clearDeletionMark(application.id));
     state.filter = "all";
     state.search = "";
     refs.search.value = "";
@@ -1706,11 +1830,924 @@
     showToast("Excel 模板已开始下载");
   }
 
+  /* ---------- GitHub cloud sync ---------- */
+
+  function syncUserError(message) {
+    const error = new Error(message);
+    error.isUserFacing = true;
+    return error;
+  }
+
+  function validateSyncConfig(raw) {
+    const repo = cleanText(raw.repo, 120);
+    const branch = cleanText(raw.branch, 80) || SYNC_DEFAULT_BRANCH;
+    const path = cleanText(raw.path, 120).replace(/^\/+/, "") || SYNC_DEFAULT_PATH;
+    const token = String(raw.token == null ? "" : raw.token).trim();
+    const invalidBranchChars = ["~", "^", ":", "?", "*", "[", "\\", " "];
+
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+      return { error: "仓库格式应为 owner/repository，例如 2015105076/qiuzhao-tracker-data。", field: "repo" };
+    }
+    if (
+      branch.startsWith("/") ||
+      branch.endsWith("/") ||
+      branch.includes("..") ||
+      Array.from(branch).some((character) => invalidBranchChars.includes(character))
+    ) {
+      return { error: "分支名称无法识别，请填写 main 或已有的分支名。", field: "branch" };
+    }
+    const segments = path.split("/");
+    if (
+      !path ||
+      segments.some((segment) => !segment || segment === "." || segment === "..") ||
+      !/\.json$/i.test(path)
+    ) {
+      return { error: "数据文件需为 JSON 文件，例如 applications.json。", field: "path" };
+    }
+    if (token.length < 10) {
+      return { error: "请填写有效的 GitHub Token。", field: "token" };
+    }
+
+    return {
+      config: {
+        repo: repo,
+        branch: branch,
+        path: path,
+        token: token,
+        autoSync: Boolean(raw.autoSync),
+        lastSyncAt: raw.lastSyncAt || null
+      }
+    };
+  }
+
+  function loadSyncConfig() {
+    try {
+      const stored = window.localStorage.getItem(SYNC_CONFIG_KEY);
+      if (!stored) return null;
+      const parsed = JSON.parse(stored);
+      const validated = validateSyncConfig(parsed || {});
+      if (!validated.config) return null;
+      const config = validated.config;
+      config.lastSyncAt =
+        !Number.isNaN(Date.parse(parsed.lastSyncAt)) && parsed.lastSyncAt
+          ? new Date(parsed.lastSyncAt).toISOString()
+          : null;
+      return config;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function storeSyncConfig(config) {
+    try {
+      window.localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(config));
+      return true;
+    } catch (error) {
+      showToast("浏览器无法保存同步设置，请检查本地存储权限。", "error");
+      return false;
+    }
+  }
+
+  function formatSyncTime(value) {
+    if (!value) return "尚未同步";
+    const timestamp = Date.parse(value);
+    if (Number.isNaN(timestamp)) return "尚未同步";
+    const diff = Date.now() - timestamp;
+    if (diff < 60000) return "刚刚";
+    if (diff < 3600000) return Math.floor(diff / 60000) + " 分钟前";
+    const date = new Date(timestamp);
+    const now = new Date();
+    if (
+      date.getFullYear() === now.getFullYear() &&
+      date.getMonth() === now.getMonth() &&
+      date.getDate() === now.getDate()
+    ) {
+      return "今天 " + new Intl.DateTimeFormat("zh-CN", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+      }).format(date);
+    }
+    return new Intl.DateTimeFormat("zh-CN", {
+      month: "long",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).format(date);
+  }
+
+  function getSyncDisplayState() {
+    const config = syncState.config;
+    if (!config) {
+      return {
+        key: "local",
+        title: "仅保存在本机",
+        description: "连接一个私有 GitHub 仓库，即可在不同设备同步投递记录。",
+        pill: "未连接",
+        badge: "仅本地存储",
+        menu: "未连接"
+      };
+    }
+    if (syncState.inFlight || syncState.status === "syncing") {
+      return {
+        key: "syncing",
+        title: "正在与 GitHub 同步…",
+        description: "正在读取远程记录并合并，请稍候。",
+        pill: "同步中",
+        badge: "同步中…",
+        menu: "同步中"
+      };
+    }
+    if (syncState.status === "error") {
+      return {
+        key: "error",
+        title: "同步遇到问题",
+        description: syncState.error || "暂时无法同步，请稍后重试。",
+        pill: "同步失败",
+        badge: "同步失败",
+        menu: "失败"
+      };
+    }
+    if (syncState.status === "offline" || navigator.onLine === false) {
+      return {
+        key: "error",
+        title: "当前处于离线状态",
+        description: "网络恢复后会自动重试，本地记录不会丢失。",
+        pill: "离线",
+        badge: "等待联网",
+        menu: "离线"
+      };
+    }
+    if (syncState.dirty) {
+      return {
+        key: "pending",
+        title: "有改动等待同步",
+        description: config.autoSync
+          ? "本地记录已保存，稍后会自动同步到 GitHub。"
+          : "自动同步已关闭，点击「立即同步」上传这次改动。",
+        pill: "待同步",
+        badge: "等待同步",
+        menu: "待同步"
+      };
+    }
+    if (!config.lastSyncAt) {
+      return {
+        key: "pending",
+        title: "已连接 GitHub",
+        description: "点击「立即同步」完成第一次同步。",
+        pill: "待同步",
+        badge: "等待同步",
+        menu: "待同步"
+      };
+    }
+    return {
+      key: "synced",
+      title: "GitHub 云同步已开启",
+      description: "上次同步：" + formatSyncTime(config.lastSyncAt) + " · " + config.repo,
+      pill: "已同步",
+      badge: "GitHub 已同步",
+      menu: "已同步"
+    };
+  }
+
+  function renderSyncUi() {
+    const config = syncState.config;
+    const view = getSyncDisplayState();
+    const connected = Boolean(config) && !syncState.editing;
+
+    refs.syncBadge.dataset.state = view.key;
+    refs.syncBadgeText.textContent = view.badge;
+    refs.syncBadge.setAttribute("aria-label", "GitHub 云同步：" + view.badge);
+    refs.syncMenuState.textContent = view.menu;
+    refs.syncMenuState.dataset.state = view.key;
+
+    refs.syncStatusCard.dataset.state = view.key;
+    refs.syncStatusTitle.textContent = view.title;
+    refs.syncStatusDesc.textContent = view.description;
+    refs.syncStatusPill.textContent = view.pill;
+
+    const topError = connected ? syncState.error : "";
+    const inlineError = connected ? "" : syncState.error || syncState.formError;
+    if (topError) {
+      refs.syncError.hidden = false;
+      refs.syncError.innerHTML =
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>' +
+        "<span>" +
+        escapeHtml(topError) +
+        "</span>";
+    } else {
+      refs.syncError.hidden = true;
+      refs.syncError.textContent = "";
+    }
+    if (inlineError) {
+      refs.syncFormError.hidden = false;
+      refs.syncFormError.textContent = inlineError;
+    } else {
+      refs.syncFormError.hidden = true;
+      refs.syncFormError.textContent = "";
+    }
+
+    refs.syncConnected.hidden = !connected;
+    refs.syncSetup.hidden = connected;
+    refs.syncSubmit.hidden = connected;
+    refs.syncCancel.textContent = connected ? "关闭" : "取消";
+    refs.syncSubmit.textContent = syncState.inFlight
+      ? "正在同步…"
+      : config
+        ? "保存并同步"
+        : "连接并同步";
+    refs.syncSubmit.disabled = syncState.inFlight;
+    refs.syncNow.disabled = syncState.inFlight || !config;
+    refs.syncEdit.disabled = syncState.inFlight;
+    refs.syncDisconnect.disabled = syncState.inFlight;
+    refs.syncAuto.disabled = syncState.inFlight || !config;
+    refs.syncAuto.checked = Boolean(config && config.autoSync);
+
+    refs.syncConnectedRepo.textContent = config ? config.repo : "—";
+    refs.syncConnectedPath.textContent = config ? config.path : "—";
+    refs.syncConnectedBranch.textContent = config ? config.branch : "—";
+    refs.syncConnectedTime.textContent = config ? formatSyncTime(config.lastSyncAt) : "尚未同步";
+
+    refs.syncTokenHint.textContent = config
+      ? "留空表示沿用已保存的 Token；如需更换，粘贴新的 Token。"
+      : "仅需对该仓库的 Contents 授予 Read and write 权限。";
+    refs.syncToken.placeholder = config ? "已保存，留空表示不修改" : "github_pat_...";
+  }
+
+  function updateSyncRepoLink() {
+    const repo = cleanText(refs.syncRepo.value, 120);
+    const valid = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo);
+    refs.syncRepoLink.href = valid ? "https://github.com/" + repo : "https://github.com";
+    refs.syncHelpRepo.textContent = valid ? repo : "owner/repo";
+  }
+
+  function clearSyncFormErrors() {
+    syncState.formError = "";
+    refs.syncForm.querySelectorAll(".field.has-error").forEach((field) => {
+      field.classList.remove("has-error");
+    });
+  }
+
+  function showSyncFormError(message, field) {
+    syncState.formError = message;
+    if (field) {
+      const wrapper = field.closest(".field");
+      if (wrapper) wrapper.classList.add("has-error");
+      field.focus();
+    }
+    renderSyncUi();
+  }
+
+  function fillSyncForm(config) {
+    refs.syncRepo.value = config ? config.repo : SYNC_DEFAULT_REPO;
+    refs.syncBranch.value = config ? config.branch : SYNC_DEFAULT_BRANCH;
+    refs.syncPath.value = config ? config.path : SYNC_DEFAULT_PATH;
+    refs.syncToken.value = "";
+    refs.syncToken.type = "password";
+    refs.syncTokenToggle.textContent = "显示";
+    refs.syncTokenToggle.setAttribute("aria-label", "显示 Token");
+    refs.syncAutoSetup.checked = config ? Boolean(config.autoSync) : true;
+    refs.syncHelp.open = !config;
+    clearSyncFormErrors();
+    updateSyncRepoLink();
+  }
+
+  function openSyncDialog() {
+    syncState.editing = !syncState.config;
+    fillSyncForm(syncState.config);
+    syncState.formError = "";
+    if (!syncState.config) syncState.error = "";
+    if (typeof refs.syncDialog.showModal === "function") {
+      refs.syncDialog.showModal();
+    } else {
+      refs.syncDialog.setAttribute("open", "");
+    }
+    document.body.classList.add("is-dialog-open");
+    renderSyncUi();
+    window.setTimeout(() => {
+      if (window.matchMedia("(max-width: 680px)").matches) return;
+      if (syncState.config && !syncState.editing) {
+        refs.syncNow.focus();
+      } else {
+        refs.syncToken.focus();
+      }
+    }, 50);
+  }
+
+  function closeSyncDialog() {
+    if (refs.syncDialog.open) {
+      refs.syncDialog.close();
+    } else {
+      refs.syncDialog.removeAttribute("open");
+    }
+  }
+
+  function handleSyncCancel() {
+    if (syncState.config && syncState.editing) {
+      syncState.editing = false;
+      syncState.formError = "";
+      renderSyncUi();
+      return;
+    }
+    closeSyncDialog();
+  }
+
+  function handleSyncSubmit() {
+    if (syncState.inFlight) return;
+    const previous = syncState.config;
+    const token =
+      refs.syncToken.value.trim() || (previous ? previous.token : "");
+    const validated = validateSyncConfig({
+      repo: refs.syncRepo.value,
+      branch: refs.syncBranch.value,
+      path: refs.syncPath.value,
+      token: token,
+      autoSync: refs.syncAutoSetup.checked,
+      lastSyncAt: previous ? previous.lastSyncAt : null
+    });
+
+    if (!validated.config) {
+      const fieldMap = {
+        repo: refs.syncRepo,
+        branch: refs.syncBranch,
+        path: refs.syncPath,
+        token: refs.syncToken
+      };
+      showSyncFormError(validated.error, fieldMap[validated.field]);
+      return;
+    }
+
+    const config = validated.config;
+    syncState.formError = "";
+    syncState.error = "";
+    syncState.config = config;
+    syncState.editing = true;
+    renderSyncUi();
+
+    runGithubSync(config, { verify: true, persistConfig: true })
+      .then(() => {
+        syncState.editing = false;
+        syncState.pending = false;
+        syncState.status = syncState.dirty ? "pending" : "synced";
+        refs.syncToken.value = "";
+        renderSyncUi();
+        if (syncState.dirty && syncState.config && syncState.config.autoSync) {
+          scheduleGithubSync(400);
+        }
+        showToast(previous ? "GitHub 连接设置已更新" : "GitHub 云同步已连接");
+      })
+      .catch((error) => {
+        syncState.config = previous;
+        syncState.status = previous ? "error" : "local";
+        syncState.error = describeGithubError(error);
+        syncState.editing = true;
+        renderSyncUi();
+        showToast(syncState.error, "error");
+      });
+  }
+
+  function buildLocalSyncDocument() {
+    return {
+      applications: state.applications,
+      deletions: state.deletions,
+      updatedAt: state.documentUpdatedAt || new Date().toISOString()
+    };
+  }
+
+  function emptySyncDocument() {
+    return { applications: [], deletions: {}, updatedAt: new Date(0).toISOString() };
+  }
+
+  function normalizeSyncDocument(raw) {
+    const parsed = Array.isArray(raw) ? { applications: raw } : raw;
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.applications)) {
+      throw syncUserError("远程数据格式无法识别，已停止同步以避免覆盖原文件。");
+    }
+    return {
+      applications: dedupeIds(parsed.applications.map(normalizeApplication).filter(Boolean)),
+      deletions: pruneDeletions(sanitizeDeletions(parsed.deletions)),
+      updatedAt:
+        !Number.isNaN(Date.parse(parsed.updatedAt)) && parsed.updatedAt
+          ? new Date(parsed.updatedAt).toISOString()
+          : new Date(0).toISOString()
+    };
+  }
+
+  function canonicalSyncApplication(application) {
+    return {
+      id: application.id,
+      company: application.company,
+      position: application.position,
+      appliedAt: application.appliedAt,
+      status: application.status,
+      channel: application.channel,
+      location: application.location,
+      notes: application.notes,
+      createdAt: application.createdAt,
+      updatedAt: application.updatedAt
+    };
+  }
+
+  function syncSignature(documentState) {
+    const applications = (documentState.applications || [])
+      .map(canonicalSyncApplication)
+      .sort((first, second) => first.id.localeCompare(second.id));
+    const deletions = {};
+    Object.keys(documentState.deletions || {})
+      .sort()
+      .forEach((id) => {
+        deletions[id] = documentState.deletions[id];
+      });
+    return JSON.stringify({ applications: applications, deletions: deletions });
+  }
+
+  function isSyncDocumentEqual(first, second) {
+    return syncSignature(first) === syncSignature(second);
+  }
+
+  function mergeSyncDocuments(localDocument, remoteDocument) {
+    const documents = [localDocument, remoteDocument].filter(Boolean);
+    const applicationMap = new Map();
+    const deletions = {};
+
+    documents.forEach((documentState) => {
+      (documentState.applications || []).forEach((application) => {
+        const current = applicationMap.get(application.id);
+        if (!current) {
+          applicationMap.set(application.id, application);
+          return;
+        }
+        const currentTime = Date.parse(current.updatedAt) || 0;
+        const incomingTime = Date.parse(application.updatedAt) || 0;
+        if (incomingTime >= currentTime) {
+          applicationMap.set(application.id, application);
+        }
+      });
+
+      Object.keys(documentState.deletions || {}).forEach((id) => {
+        const incoming = Date.parse(documentState.deletions[id]);
+        const current = Date.parse(deletions[id]);
+        if (Number.isNaN(current) || incoming >= current) {
+          deletions[id] = new Date(incoming).toISOString();
+        }
+      });
+    });
+
+    Object.keys(deletions).forEach((id) => {
+      const application = applicationMap.get(id);
+      if (!application) return;
+      const deletedAt = Date.parse(deletions[id]) || 0;
+      const updatedAt = Date.parse(application.updatedAt) || 0;
+      if (deletedAt >= updatedAt) {
+        applicationMap.delete(id);
+      } else {
+        delete deletions[id];
+      }
+    });
+
+    const stamps = documents
+      .map((documentState) => Date.parse(documentState.updatedAt))
+      .filter((stamp) => !Number.isNaN(stamp));
+    const updatedAt = stamps.length
+      ? new Date(Math.max.apply(null, stamps)).toISOString()
+      : new Date().toISOString();
+
+    return {
+      applications: Array.from(applicationMap.values()),
+      deletions: pruneDeletions(deletions),
+      updatedAt: updatedAt
+    };
+  }
+
+  function applySyncDocument(documentState) {
+    state.applications = dedupeIds(
+      documentState.applications.map(normalizeApplication).filter(Boolean)
+    );
+    state.deletions = pruneDeletions(documentState.deletions || {});
+    state.documentUpdatedAt = documentState.updatedAt || new Date().toISOString();
+    saveApplications({ touch: false, skipCloudSync: true });
+    render();
+  }
+
+  function encodeBase64Utf8(value) {
+    const bytes = new TextEncoder().encode(value);
+    let binary = "";
+    const chunkSize = 0x8000;
+    for (let index = 0; index < bytes.length; index += chunkSize) {
+      binary += String.fromCharCode.apply(
+        null,
+        bytes.subarray(index, index + chunkSize)
+      );
+    }
+    return window.btoa(binary);
+  }
+
+  function decodeBase64Utf8(value) {
+    const binary = window.atob(String(value).replace(/\s/g, ""));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return new TextDecoder().decode(bytes);
+  }
+
+  function encodeGithubPath(path) {
+    return path
+      .split("/")
+      .filter(Boolean)
+      .map((segment) => encodeURIComponent(segment))
+      .join("/");
+  }
+
+  async function githubFetch(config, endpoint, options) {
+    const settings = options || {};
+    const headers = {
+      Accept: "application/vnd.github+json",
+      Authorization: "Bearer " + config.token,
+      "X-GitHub-Api-Version": "2022-11-28"
+    };
+    if (settings.body) headers["Content-Type"] = "application/json";
+
+    let response;
+    try {
+      response = await fetch(SYNC_API_BASE + endpoint, {
+        method: settings.method || "GET",
+        headers: headers,
+        body: settings.body ? JSON.stringify(settings.body) : undefined,
+        cache: "no-store"
+      });
+    } catch (error) {
+      throw syncUserError("无法连接到 GitHub，请检查网络后重试。");
+    }
+
+    if (settings.allow404 && response.status === 404) return null;
+
+    let data = null;
+    const text = await response.text();
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch (error) {
+        data = null;
+      }
+    }
+
+    if (!response.ok) {
+      const error = new Error(
+        (data && data.message) || "GitHub 请求失败（HTTP " + response.status + "）。"
+      );
+      error.status = response.status;
+      error.apiMessage = data && data.message ? data.message : "";
+      throw error;
+    }
+    return data;
+  }
+
+  async function verifyGithubAccess(config) {
+    const repoParts = config.repo.split("/");
+    const repoEndpoint =
+      "/repos/" +
+      encodeURIComponent(repoParts[0]) +
+      "/" +
+      encodeURIComponent(repoParts[1]);
+
+    let repoInfo;
+    try {
+      repoInfo = await githubFetch(config, repoEndpoint);
+    } catch (error) {
+      if (error.status === 404) {
+        throw syncUserError("找不到这个仓库，或 Token 没有访问权限。请检查仓库名与 Token 权限。");
+      }
+      throw error;
+    }
+
+    if (!repoInfo || repoInfo.private !== true) {
+      throw syncUserError("这个仓库不是私有仓库。为避免投递信息被公开，请使用私有仓库。");
+    }
+
+    try {
+      await githubFetch(
+        config,
+        repoEndpoint + "/branches/" + encodeURIComponent(config.branch)
+      );
+    } catch (error) {
+      if (error.status === 404) {
+        throw syncUserError("仓库中找不到分支「" + config.branch + "」，请检查分支名称。");
+      }
+      throw error;
+    }
+
+    return repoInfo;
+  }
+
+  async function fetchRemoteSyncDocument(config) {
+    const repoParts = config.repo.split("/");
+    const endpoint =
+      "/repos/" +
+      encodeURIComponent(repoParts[0]) +
+      "/" +
+      encodeURIComponent(repoParts[1]) +
+      "/contents/" +
+      encodeGithubPath(config.path) +
+      "?ref=" +
+      encodeURIComponent(config.branch);
+
+    const file = await githubFetch(config, endpoint, { allow404: true });
+    if (!file) return null;
+    if (file.type && file.type !== "file") {
+      throw syncUserError("数据路径指向的不是文件，请更换数据文件路径。");
+    }
+
+    let content = "";
+    if (file.encoding === "base64" && file.content) {
+      content = decodeBase64Utf8(file.content);
+    } else if (file.download_url) {
+      const rawResponse = await fetch(file.download_url, {
+        headers: {
+          Authorization: "Bearer " + config.token,
+          Accept: "application/vnd.github.raw"
+        },
+        cache: "no-store"
+      });
+      if (!rawResponse.ok) {
+        throw syncUserError("无法读取远程数据文件，请检查 Token 权限。");
+      }
+      content = await rawResponse.text();
+    }
+
+    if (!content.trim()) {
+      return { sha: file.sha, document: emptySyncDocument() };
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(content.replace(/^\uFEFF/, ""));
+    } catch (error) {
+      throw syncUserError("远程数据文件不是有效的 JSON，已停止同步以避免覆盖原文件。");
+    }
+    return { sha: file.sha, document: normalizeSyncDocument(parsed) };
+  }
+
+  async function putRemoteSyncDocument(config, documentState, sha) {
+    const repoParts = config.repo.split("/");
+    const endpoint =
+      "/repos/" +
+      encodeURIComponent(repoParts[0]) +
+      "/" +
+      encodeURIComponent(repoParts[1]) +
+      "/contents/" +
+      encodeGithubPath(config.path);
+
+    const payload = {
+      message:
+        "chore: sync qiuzhao applications (" +
+        documentState.applications.length +
+        " records)",
+      content: encodeBase64Utf8(
+        JSON.stringify(
+          Object.assign({ app: "投递簿", version: 2 }, documentState),
+          null,
+          2
+        )
+      ),
+      branch: config.branch
+    };
+    if (sha) payload.sha = sha;
+
+    return githubFetch(config, endpoint, { method: "PUT", body: payload });
+  }
+
+  function isGithubConflict(error) {
+    return Boolean(error && (error.status === 409 || error.status === 422));
+  }
+
+  function describeGithubError(error) {
+    if (!error) return "GitHub 同步失败，请稍后重试。";
+    if (error.isUserFacing) return error.message;
+    if (navigator.onLine === false) return "当前处于离线状态，网络恢复后会自动重试。";
+    if (error.status === 401) return "Token 无效或已过期，请重新生成并更新 Token。";
+    if (error.status === 403) {
+      return "Token 权限不足，或 GitHub API 暂时限制了请求。请检查 Contents 写入权限后重试。";
+    }
+    if (error.status === 404) return "找不到仓库、分支或数据文件，或 Token 没有访问权限。";
+    if (error.status === 409 || error.status === 422) {
+      return "远程数据刚刚被其他设备更新，请再次点击同步。";
+    }
+    if (error.status >= 500) return "GitHub 服务暂时不可用，请稍后重试。";
+    if (error.name === "TypeError") return "无法连接到 GitHub，请检查网络后重试。";
+    return error.message || "GitHub 同步失败，请稍后重试。";
+  }
+
+  async function runGithubSync(config, options) {
+    const settings = options || {};
+    const startChangeVersion = syncState.changeVersion;
+    syncState.inFlight = true;
+    syncState.status = "syncing";
+    syncState.error = "";
+    syncState.lastAttemptAt = Date.now();
+    renderSyncUi();
+
+    try {
+      if (settings.verify) {
+        await verifyGithubAccess(config);
+      }
+
+      let remoteEntry = await fetchRemoteSyncDocument(config);
+      let localDocument = buildLocalSyncDocument();
+      let merged = mergeSyncDocuments(
+        localDocument,
+        remoteEntry ? remoteEntry.document : null
+      );
+      let localChanged = false;
+
+      if (!isSyncDocumentEqual(localDocument, merged)) {
+        applySyncDocument(merged);
+        localChanged = true;
+        localDocument = merged;
+      }
+
+      let uploaded = false;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const remoteDocument = remoteEntry ? remoteEntry.document : null;
+        if (remoteDocument && isSyncDocumentEqual(remoteDocument, merged)) break;
+
+        const payload = Object.assign({}, merged, {
+          updatedAt: new Date().toISOString()
+        });
+        try {
+          await putRemoteSyncDocument(
+            config,
+            payload,
+            remoteEntry ? remoteEntry.sha : null
+          );
+          uploaded = true;
+          merged = payload;
+          state.documentUpdatedAt = payload.updatedAt;
+          saveApplications({ touch: false, skipCloudSync: true });
+          break;
+        } catch (error) {
+          if (isGithubConflict(error) && attempt < 2) {
+            remoteEntry = await fetchRemoteSyncDocument(config);
+            merged = mergeSyncDocuments(
+              buildLocalSyncDocument(),
+              remoteEntry ? remoteEntry.document : null
+            );
+            if (!isSyncDocumentEqual(buildLocalSyncDocument(), merged)) {
+              applySyncDocument(merged);
+              localChanged = true;
+            }
+            continue;
+          }
+          throw error;
+        }
+      }
+
+      const syncedAt = new Date().toISOString();
+      config.lastSyncAt = syncedAt;
+      syncState.config = config;
+      syncState.lastSyncAt = Date.parse(syncedAt);
+      storeSyncConfig(config);
+
+      const changedDuringSync = syncState.changeVersion !== startChangeVersion;
+      syncState.dirty = changedDuringSync;
+      syncState.status = changedDuringSync ? "pending" : "synced";
+      syncState.error = "";
+      syncState.notifiedError = false;
+      return { uploaded: uploaded, localChanged: localChanged };
+    } catch (error) {
+      syncState.status = navigator.onLine === false ? "offline" : "error";
+      syncState.error = describeGithubError(error);
+      syncState.dirty = true;
+      throw error;
+    } finally {
+      syncState.inFlight = false;
+      renderSyncUi();
+    }
+  }
+
+  async function syncGithub(options) {
+    const settings = options || {};
+    const config = syncState.config;
+
+    if (!config) {
+      if (settings.manual) openSyncDialog();
+      return null;
+    }
+    if (syncState.syncPromise) {
+      syncState.pending = true;
+      return syncState.syncPromise;
+    }
+    if (syncState.inFlight) {
+      syncState.pending = true;
+      return null;
+    }
+    if (navigator.onLine === false) {
+      syncState.status = "offline";
+      syncState.error = "当前处于离线状态，网络恢复后会自动重试。";
+      renderSyncUi();
+      if (settings.manual) showToast(syncState.error, "error");
+      return null;
+    }
+
+    if (syncState.timer) {
+      window.clearTimeout(syncState.timer);
+      syncState.timer = null;
+    }
+    syncState.pending = false;
+
+    const promise = runGithubSync(config, { verify: false, persistConfig: true });
+    syncState.syncPromise = promise;
+    try {
+      const result = await promise;
+      if (settings.manual) {
+        showToast(
+          result.localChanged
+            ? "已同步，并更新了本地记录"
+            : "GitHub 同步完成"
+        );
+      } else if (result.localChanged) {
+        showToast("已从 GitHub 同步最新投递记录");
+      }
+      syncState.notifiedError = false;
+      return result;
+    } catch (error) {
+      if (settings.manual) {
+        showToast(describeGithubError(error), "error");
+      } else if (!syncState.notifiedError) {
+        syncState.notifiedError = true;
+        showToast("GitHub 自动同步失败，请打开「数据 → GitHub 云同步」查看原因。", "error");
+      }
+      return null;
+    } finally {
+      syncState.syncPromise = null;
+      if (syncState.pending) {
+        syncState.pending = false;
+        window.setTimeout(function () {
+          if (syncState.config && syncState.config.autoSync) {
+            syncGithub({ reason: "pending" });
+          }
+        }, 350);
+      }
+    }
+  }
+
+  function scheduleGithubSync(delay) {
+    if (!syncState.config || !syncState.config.autoSync) return;
+    if (syncState.timer) {
+      window.clearTimeout(syncState.timer);
+      syncState.timer = null;
+    }
+    if (syncState.inFlight) {
+      syncState.pending = true;
+      return;
+    }
+    if (syncState.status !== "error") syncState.status = "pending";
+    renderSyncUi();
+    syncState.timer = window.setTimeout(function () {
+      syncState.timer = null;
+      syncGithub({ reason: "change" });
+    }, typeof delay === "number" ? delay : SYNC_DEBOUNCE_MS);
+  }
+
+  function onLocalDataChanged() {
+    syncState.changeVersion += 1;
+    if (!syncState.config) return;
+    syncState.dirty = true;
+    if (syncState.config.autoSync) {
+      scheduleGithubSync();
+    } else {
+      if (!syncState.inFlight) syncState.status = "pending";
+      renderSyncUi();
+    }
+  }
+
+  function maybeSyncOnFocus() {
+    if (!syncState.config || !syncState.config.autoSync) return;
+    if (document.visibilityState !== "visible") return;
+    if (syncState.inFlight) return;
+    if (Date.now() - syncState.lastAttemptAt < SYNC_FOCUS_THROTTLE_MS) return;
+    syncGithub({ reason: "focus" });
+  }
+
+
   /* ---------- Events ---------- */
 
   document.addEventListener("click", function (event) {
     const target = event.target;
     if (!(target instanceof Element)) return;
+
+    const syncOpen = target.closest("[data-open-sync]");
+    if (syncOpen) {
+      openSyncDialog();
+      return;
+    }
+
+    const syncClose = target.closest("[data-close-sync]");
+    if (syncClose) {
+      closeSyncDialog();
+      return;
+    }
 
     const importOpen = target.closest("[data-open-import]");
     if (importOpen) {
@@ -1798,6 +2835,7 @@
     if (dataAction) {
       setDataMenu(false);
       const action = dataAction.getAttribute("data-data-action");
+      if (action === "github-sync") openSyncDialog();
       if (action === "import-excel") openImportDialog();
       if (action === "download-template") downloadExcelTemplate();
       if (action === "export-csv") exportCsv();
@@ -1890,13 +2928,28 @@
     }
   });
 
-  [refs.applicationDialog, refs.confirmDialog, refs.importDialog].forEach((dialog) => {
+  refs.syncDialog.addEventListener("close", function () {
+    syncState.editing = false;
+    syncState.formError = "";
+    refs.syncToken.value = "";
+    refs.syncToken.type = "password";
+    refs.syncTokenToggle.textContent = "显示";
+    refs.syncTokenToggle.setAttribute("aria-label", "显示 Token");
+    if (!document.querySelector("dialog[open]")) {
+      document.body.classList.remove("is-dialog-open");
+    }
+    renderSyncUi();
+  });
+
+  [refs.applicationDialog, refs.confirmDialog, refs.importDialog, refs.syncDialog].forEach((dialog) => {
     dialog.addEventListener("click", function (event) {
       if (event.target !== dialog) return;
       if (dialog === refs.confirmDialog) {
         closeConfirmDialog();
       } else if (dialog === refs.importDialog) {
         closeImportDialog();
+      } else if (dialog === refs.syncDialog) {
+        closeSyncDialog();
       } else {
         closeApplicationDialog();
       }
@@ -2016,16 +3069,157 @@
 
   refs.confirmImport.addEventListener("click", confirmExcelImport);
 
+  refs.syncForm.addEventListener("submit", function (event) {
+    event.preventDefault();
+    handleSyncSubmit();
+  });
+
+  refs.syncForm.addEventListener("keydown", function (event) {
+    if (event.key !== "Enter" || event.isComposing) return;
+    if (!(event.target instanceof HTMLInputElement)) return;
+    event.preventDefault();
+    handleSyncSubmit();
+  });
+
+  refs.syncForm.addEventListener("input", function (event) {
+    const field = event.target.closest(".field");
+    if (field) field.classList.remove("has-error");
+    if (syncState.formError) {
+      syncState.formError = "";
+      renderSyncUi();
+    }
+  });
+
+  refs.syncRepo.addEventListener("input", updateSyncRepoLink);
+
+  refs.syncSubmit.addEventListener("click", handleSyncSubmit);
+  refs.syncCancel.addEventListener("click", handleSyncCancel);
+
+  refs.syncNow.addEventListener("click", function () {
+    syncGithub({ manual: true });
+  });
+
+  refs.syncEdit.addEventListener("click", function () {
+    syncState.editing = true;
+    fillSyncForm(syncState.config);
+    refs.syncHelp.open = false;
+    renderSyncUi();
+    window.setTimeout(() => refs.syncToken.focus(), 50);
+  });
+
+  refs.syncDisconnect.addEventListener("click", function () {
+    const confirmed = window.confirm(
+      "确定断开这台设备的 GitHub 同步吗？\n云端仓库中的数据不会被删除，本地记录也会保留。"
+    );
+    if (!confirmed) return;
+    try {
+      window.localStorage.removeItem(SYNC_CONFIG_KEY);
+    } catch (error) {
+      /* The in-memory connection is still removed below. */
+    }
+    if (syncState.timer) {
+      window.clearTimeout(syncState.timer);
+      syncState.timer = null;
+    }
+    syncState.config = null;
+    syncState.status = "local";
+    syncState.error = "";
+    syncState.formError = "";
+    syncState.dirty = false;
+    syncState.lastSyncAt = 0;
+    syncState.editing = true;
+    fillSyncForm(null);
+    renderSyncUi();
+    showToast("已断开 GitHub 云同步，本地记录仍然保留");
+  });
+
+  refs.syncAuto.addEventListener("change", function () {
+    if (!syncState.config) return;
+    syncState.config.autoSync = refs.syncAuto.checked;
+    storeSyncConfig(syncState.config);
+    refs.syncAutoSetup.checked = refs.syncAuto.checked;
+    if (!syncState.config.autoSync && syncState.timer) {
+      window.clearTimeout(syncState.timer);
+      syncState.timer = null;
+    }
+    if (syncState.config.autoSync) {
+      scheduleGithubSync(300);
+    }
+    renderSyncUi();
+  });
+
+  refs.syncTokenToggle.addEventListener("click", function () {
+    const showing = refs.syncToken.type === "text";
+    refs.syncToken.type = showing ? "password" : "text";
+    refs.syncTokenToggle.textContent = showing ? "显示" : "隐藏";
+    refs.syncTokenToggle.setAttribute("aria-label", showing ? "显示 Token" : "隐藏 Token");
+  });
+
   window.addEventListener("storage", function (event) {
-    if (event.key !== STORAGE_KEY) return;
-    state.applications = loadApplications();
-    render();
+    if (event.key === STORAGE_KEY) {
+      const documentState = loadLocalDocument();
+      state.applications = documentState.applications;
+      state.deletions = documentState.deletions;
+      state.documentUpdatedAt = documentState.updatedAt;
+      render();
+    }
+    if (event.key === SYNC_CONFIG_KEY) {
+      syncState.config = loadSyncConfig();
+      syncState.lastSyncAt = syncState.config
+        ? Date.parse(syncState.config.lastSyncAt) || 0
+        : 0;
+      syncState.status = syncState.config ? "idle" : "local";
+      renderSyncUi();
+    }
+  });
+
+  window.addEventListener("focus", maybeSyncOnFocus);
+  document.addEventListener("visibilitychange", maybeSyncOnFocus);
+  window.setInterval(function () {
+    if (!syncState.config || !syncState.config.autoSync) return;
+    if (document.visibilityState !== "visible") return;
+    if (syncState.inFlight || syncState.syncPromise) return;
+    if (Date.now() - syncState.lastAttemptAt < 55000) return;
+    syncGithub({ reason: "poll" });
+  }, 60000);
+  window.addEventListener("online", function () {
+    if (!syncState.config) return;
+    if (syncState.status === "offline") {
+      syncState.status = syncState.dirty ? "pending" : "idle";
+      syncState.error = "";
+      renderSyncUi();
+    }
+    if (syncState.config.autoSync) {
+      syncState.lastAttemptAt = 0;
+      syncGithub({ reason: "online" });
+    }
+  });
+  window.addEventListener("offline", function () {
+    if (!syncState.config) return;
+    syncState.status = "offline";
+    syncState.error = "当前处于离线状态，网络恢复后会自动重试。";
+    renderSyncUi();
   });
 
   /* ---------- Initialization ---------- */
 
   initFormOptions();
-  state.applications = loadApplications();
+  const initialDocument = loadLocalDocument();
+  state.applications = initialDocument.applications;
+  state.deletions = initialDocument.deletions;
+  state.documentUpdatedAt = initialDocument.updatedAt;
+  syncState.config = loadSyncConfig();
+  syncState.lastSyncAt = syncState.config ? Date.parse(syncState.config.lastSyncAt) || 0 : 0;
+  syncState.status = syncState.config ? "idle" : "local";
+  if (
+    syncState.config &&
+    initialDocument.updatedAt &&
+    (!syncState.config.lastSyncAt ||
+      Date.parse(initialDocument.updatedAt) > Date.parse(syncState.config.lastSyncAt))
+  ) {
+    syncState.dirty = true;
+    syncState.status = "pending";
+  }
   try {
     const storedView = window.localStorage.getItem(VIEW_KEY);
     if (storedView === "board" || storedView === "list") state.view = storedView;
@@ -2034,6 +3228,10 @@
   }
 
   render();
+  renderSyncUi();
+  if (syncState.config && syncState.config.autoSync) {
+    window.setTimeout(() => syncGithub({ reason: "startup" }), 700);
+  }
 
   // Highlight the section currently in view in the top navigation.
   if ("IntersectionObserver" in window) {
