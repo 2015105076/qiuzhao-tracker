@@ -4,18 +4,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>投递簿 · 秋招投递手帐</title>
-  <meta name="description" content="一本安静、清晰的秋招投递手帐。记录投递时间、企业、岗位与状态，让每一次投递都有迹可循。">
+  <meta name="description" content="一本安静、清晰的秋招投递手帐。记录投递时间、企业、岗位与状态，支持 Excel 批量导入，让每一次投递都有迹可循。">
   <meta name="theme-color" content="#f4f0e7">
   <meta property="og:type" content="website">
   <meta property="og:title" content="投递簿 · 秋招投递手帐">
-  <meta property="og:description" content="把公司、岗位与进度收进同一本手帐，让每一次投递都有迹可循。">
+  <meta property="og:description" content="把公司、岗位与进度收进同一本手帐，支持 Excel 批量导入，让每一次投递都有迹可循。">
   <meta property="og:url" content="https://2015105076.github.io/qiuzhao-tracker/">
   <meta property="og:image" content="https://2015105076.github.io/qiuzhao-tracker/assets/og-cover.jpg">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="投递簿 · 秋招投递手帐">
-  <meta name="twitter:description" content="把公司、岗位与进度收进同一本手帐，让每一次投递都有迹可循。">
+  <meta name="twitter:description" content="把公司、岗位与进度收进同一本手帐，支持 Excel 批量导入，让每一次投递都有迹可循。">
   <meta name="twitter:image" content="https://2015105076.github.io/qiuzhao-tracker/assets/og-cover.jpg">
   <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
   <link rel="apple-touch-icon" href="assets/favicon.svg">
@@ -48,6 +48,16 @@
             <span>数据</span>
           </button>
           <div class="dropdown-menu" id="data-menu" role="menu" hidden>
+            <p class="dropdown-label">批量导入</p>
+            <button type="button" role="menuitem" data-data-action="import-excel">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/><path d="m15.5 12.5 2 2-2 2"/></svg>
+              Excel 批量导入
+            </button>
+            <button type="button" role="menuitem" data-data-action="download-template">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v3h16v-3"/></svg>
+              下载 Excel 模板
+            </button>
+            <div class="dropdown-divider"></div>
             <p class="dropdown-label">本地数据</p>
             <button type="button" role="menuitem" data-data-action="export-csv">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v3h16v-3"/></svg>
@@ -195,6 +205,10 @@
           </div>
           <div class="toolbar-actions">
             <span class="local-badge"><span class="local-dot"></span>本地存储</span>
+            <button type="button" class="btn btn-outline btn-sm import-trigger" data-open-import>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>
+              导入 Excel
+            </button>
             <button type="button" class="btn btn-outline btn-sm" data-open-add>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
               新增投递
@@ -306,6 +320,92 @@
         </div>
       </div>
     </form>
+  </dialog>
+
+  <dialog class="import-dialog" id="import-dialog" aria-labelledby="import-title">
+    <div class="import-shell">
+      <div class="dialog-head">
+        <div>
+          <p class="section-kicker">IMPORT FROM EXCEL</p>
+          <h2 id="import-title">批量导入投递</h2>
+        </div>
+        <button type="button" class="icon-btn dialog-close" data-close-import aria-label="关闭批量导入">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+
+      <div class="import-body">
+        <div class="import-dropzone" id="excel-dropzone">
+          <div class="import-drop-icon" aria-hidden="true">
+            <svg viewBox="0 0 48 48"><path d="M13 5h15l9 9v29H13z"/><path d="M28 5v10h9M18 26h14M18 33h10"/><path d="m30 17 4 4-4 4" opacity=".6"/></svg>
+          </div>
+          <h3>拖入 Excel，一次填好一批投递</h3>
+          <p>支持 .xlsx / .xls / .csv 文件，单次最多 1,000 条记录。文件只在本机解析，不会上传。</p>
+          <div class="import-fields" aria-label="可识别字段">
+            <span>企业</span><span>岗位</span><span>投递时间</span><span>状态</span><span>渠道</span><span>城市</span><span>备注</span>
+          </div>
+          <div class="import-drop-actions">
+            <button type="button" class="btn btn-primary btn-sm" id="choose-excel">选择 Excel 文件</button>
+            <button type="button" class="btn btn-quiet btn-sm import-template-link" data-download-template>下载导入模板</button>
+          </div>
+        </div>
+
+        <div class="import-loading" id="import-loading" hidden>
+          <span class="import-spinner" aria-hidden="true"></span>
+          <span>正在读取并校验表格…</span>
+        </div>
+
+        <div class="import-error" id="import-error" role="alert" hidden></div>
+
+        <div class="import-result" id="import-result" hidden>
+          <div class="import-filebar">
+            <div class="import-file-icon" aria-hidden="true">XLS</div>
+            <div class="import-file-info">
+              <strong id="import-file-name">投递记录.xlsx</strong>
+              <small id="import-file-meta">工作表：Sheet1</small>
+            </div>
+            <button type="button" class="btn btn-quiet btn-sm" id="import-reselect">重新选择</button>
+          </div>
+
+          <div class="import-summary" id="import-summary" aria-live="polite"></div>
+
+          <div class="import-preview-head">
+            <h3>数据预览</h3>
+            <span id="import-preview-note">仅展示前 50 行</span>
+          </div>
+          <div class="import-table-wrap">
+            <table class="import-preview-table">
+              <thead>
+                <tr>
+                  <th class="col-row">行</th>
+                  <th class="col-company">企业</th>
+                  <th class="col-position">岗位</th>
+                  <th class="col-date">投递时间</th>
+                  <th class="col-status">状态</th>
+                  <th class="col-validation">校验结果</th>
+                </tr>
+              </thead>
+              <tbody id="import-preview-body"></tbody>
+            </table>
+          </div>
+
+          <label class="import-skip">
+            <input type="checkbox" id="import-skip-duplicates" checked>
+            <span>跳过与已有记录或表中其他行重复的数据</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="dialog-foot import-foot">
+        <button type="button" class="import-template-link" data-download-template>下载 Excel 模板</button>
+        <div class="dialog-actions">
+          <button type="button" class="btn btn-quiet" data-close-import>取消</button>
+          <button type="button" class="btn btn-primary" id="confirm-import" disabled>导入 0 条</button>
+        </div>
+      </div>
+
+      <input type="file" id="excel-file" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv" hidden>
+    </div>
   </dialog>
 
   <dialog class="confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-title">

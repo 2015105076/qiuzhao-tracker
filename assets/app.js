@@ -16,6 +16,43 @@
 
   const STATUS_MAP = Object.fromEntries(STATUSES.map((status) => [status.key, status]));
   const CHANNELS = ["官网投递", "内推", "招聘平台", "校园宣讲", "其他"];
+  const IMPORT_MAX_ROWS = 1000;
+  const IMPORT_MAX_FILE_SIZE = 8 * 1024 * 1024;
+  const IMPORT_PREVIEW_LIMIT = 50;
+  const XLSX_SCRIPT_URL = "assets/vendor/xlsx.full.min.js";
+  const IMPORT_COLUMNS = [
+    { key: "company", label: "企业" },
+    { key: "position", label: "岗位" },
+    { key: "appliedAt", label: "投递时间" },
+    { key: "status", label: "状态" },
+    { key: "channel", label: "投递渠道" },
+    { key: "location", label: "工作城市" },
+    { key: "notes", label: "备注" }
+  ];
+  const IMPORT_HEADER_ALIASES = {
+    company: ["企业", "公司", "企业名称", "公司名称", "单位", "单位名称", "应聘企业", "company", "companyname"],
+    position: ["岗位", "职位", "岗位名称", "职位名称", "投递岗位", "应聘岗位", "应聘职位", "position", "jobtitle", "role"],
+    appliedAt: ["投递时间", "投递日期", "申请时间", "申请日期", "日期", "时间", "appliedat", "applieddate", "applydate", "applicationdate", "date"],
+    status: ["状态", "投递状态", "当前状态", "进度", "status", "currentstatus"],
+    channel: ["渠道", "投递渠道", "来源", "申请渠道", "channel", "source"],
+    location: ["城市", "工作城市", "地点", "工作地点", "base", "location", "city"],
+    notes: ["备注", "说明", "备注信息", "notes", "note", "remark"]
+  };
+  const IMPORT_STATUS_ALIASES = {
+    applied: ["已投递", "投递", "已申请", "申请中", "已提交", "applied", "submitted", "apply"],
+    screening: ["筛选中", "筛选", "初筛", "简历筛选", "评估中", "screening"],
+    written: ["笔试", "笔试中", "在线笔试", "测评", "测试", "written", "test", "assessment"],
+    interview: ["面试中", "面试", "一面", "二面", "三面", "hr面", "终面", "interview", "interviewing"],
+    offer: ["已获offer", "offer", "已offer", "收到offer", "录用", "已录用", "意向书", "已发offer"],
+    rejected: ["未通过", "已挂", "挂", "拒绝", "已拒绝", "淘汰", "未录用", "rejected", "reject", "failed"]
+  };
+  const IMPORT_CHANNEL_ALIASES = [
+    { value: "内推", aliases: ["内推", "referral", "refer", "员工推荐"] },
+    { value: "官网投递", aliases: ["官网", "官网投递", "网申", "校招官网", "official", "careers"] },
+    { value: "招聘平台", aliases: ["招聘平台", "boss", "boss直聘", "智联", "智联招聘", "前程无忧", "猎聘", "牛客", "拉勾", "linkedin", "领英"] },
+    { value: "校园宣讲", aliases: ["校园", "宣讲", "校园宣讲", "校招", "双选会", "校招会"] },
+    { value: "其他", aliases: ["其他", "other", "其它"] }
+  ];
   const ACTIVE_STATUSES = new Set(["applied", "screening", "written", "interview"]);
   const ADVANCED_STATUSES = new Set(["screening", "written", "interview", "offer"]);
   const LOGO_PALETTES = [
@@ -49,7 +86,21 @@
     listCount: document.getElementById("list-count"),
     dataMenuButton: document.getElementById("data-menu-btn"),
     dataMenu: document.getElementById("data-menu"),
+    importDialog: document.getElementById("import-dialog"),
     importFile: document.getElementById("import-file"),
+    excelFile: document.getElementById("excel-file"),
+    excelDropzone: document.getElementById("excel-dropzone"),
+    importLoading: document.getElementById("import-loading"),
+    importError: document.getElementById("import-error"),
+    importResult: document.getElementById("import-result"),
+    importFileName: document.getElementById("import-file-name"),
+    importFileMeta: document.getElementById("import-file-meta"),
+    importSummary: document.getElementById("import-summary"),
+    importPreviewBody: document.getElementById("import-preview-body"),
+    importPreviewNote: document.getElementById("import-preview-note"),
+    importSkipDuplicates: document.getElementById("import-skip-duplicates"),
+    importReselect: document.getElementById("import-reselect"),
+    confirmImport: document.getElementById("confirm-import"),
     toastRegion: document.getElementById("toast-region"),
     progressRing: document.getElementById("progress-ring"),
     seasonYear: document.getElementById("season-year"),
@@ -64,6 +115,15 @@
     editingId: null,
     pendingDeleteId: null,
     storageWarningShown: false
+  };
+
+  const importState = {
+    rows: [],
+    fileName: "",
+    sheetName: "",
+    skipDuplicates: true,
+    parseToken: 0,
+    xlsxPromise: null
   };
 
   /* ---------- Utilities ---------- */
@@ -460,6 +520,10 @@
         '<button type="button" class="btn btn-primary" data-open-add>',
         '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
         "记录第一次投递</button>",
+        '<button type="button" class="empty-import-link" data-open-import>',
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>',
+        "已有 Excel？批量导入",
+        "</button>",
         "</div>"
       ].join("");
     }
@@ -1049,11 +1113,623 @@
     reader.readAsText(file);
   }
 
+  /* ---------- Excel batch import ---------- */
+
+  function normalizeImportText(value) {
+    return String(value == null ? "" : value)
+      .replace(/\uFEFF/g, "")
+      .replace(/[（(][^）)]*[）)]/g, "")
+      .replace(/[\s：:*＊]/g, "")
+      .replace(/必填|选填/g, "")
+      .toLowerCase();
+  }
+
+  function importUserError(message) {
+    const error = new Error(message);
+    error.isUserFacing = true;
+    return error;
+  }
+
+  function formatFileSize(bytes) {
+    if (!Number.isFinite(bytes) || bytes <= 0) return "0 KB";
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  function loadXlsxLibrary() {
+    if (window.XLSX) return Promise.resolve(window.XLSX);
+    if (importState.xlsxPromise) return importState.xlsxPromise;
+
+    importState.xlsxPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = new URL(XLSX_SCRIPT_URL, document.baseURI).href;
+      script.async = true;
+      script.dataset.xlsxLibrary = "true";
+      script.onload = () => {
+        if (window.XLSX) {
+          resolve(window.XLSX);
+        } else {
+          importState.xlsxPromise = null;
+          reject(importUserError("Excel 解析组件加载失败，请刷新页面后重试。"));
+        }
+      };
+      script.onerror = () => {
+        importState.xlsxPromise = null;
+        script.remove();
+        reject(importUserError("Excel 解析组件加载失败，请检查网络后重试。"));
+      };
+      document.head.appendChild(script);
+    });
+
+    return importState.xlsxPromise;
+  }
+
+  function detectImportHeader(rows) {
+    const fields = Object.keys(IMPORT_HEADER_ALIASES);
+    const limit = Math.min(rows.length, 20);
+
+    for (let rowIndex = 0; rowIndex < limit; rowIndex += 1) {
+      const headerCells = (rows[rowIndex] || []).map(normalizeImportText);
+      const mapping = {};
+
+      fields.forEach((field) => {
+        const aliases = IMPORT_HEADER_ALIASES[field].map(normalizeImportText);
+        const index = headerCells.findIndex(
+          (cell) => cell && aliases.includes(cell)
+        );
+        if (index >= 0) mapping[field] = index;
+      });
+
+      if (mapping.company != null && mapping.position != null && mapping.appliedAt != null) {
+        return { rowIndex: rowIndex, mapping: mapping };
+      }
+    }
+
+    return null;
+  }
+
+  function isoFromParts(year, month, day) {
+    if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+      return "";
+    }
+    const value = [
+      String(year).padStart(4, "0"),
+      String(month).padStart(2, "0"),
+      String(day).padStart(2, "0")
+    ].join("-");
+    return isValidIsoDate(value) ? value : "";
+  }
+
+  function parseImportDate(value, XLSX, date1904) {
+    if (value instanceof Date && !Number.isNaN(value.getTime())) {
+      return isoFromParts(value.getFullYear(), value.getMonth() + 1, value.getDate());
+    }
+
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const parsed = XLSX.SSF.parse_date_code(value, { date1904: Boolean(date1904) });
+      if (parsed && parsed.y && parsed.m && parsed.d) {
+        return isoFromParts(parsed.y, parsed.m, parsed.d);
+      }
+      return "";
+    }
+
+    const text = String(value == null ? "" : value).trim().replace(/^['"]/, "");
+    if (!text) return "";
+
+    let match = text.match(/^(\d{4})[\-\/.年](\d{1,2})[\-\/.月](\d{1,2})日?/);
+    if (match) {
+      return isoFromParts(Number(match[1]), Number(match[2]), Number(match[3]));
+    }
+
+    match = text.match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (match) {
+      return isoFromParts(Number(match[1]), Number(match[2]), Number(match[3]));
+    }
+
+    match = text.match(/^(\d{1,2})[\-\/.](\d{1,2})[\-\/.](\d{4})$/);
+    if (match) {
+      const first = Number(match[1]);
+      const second = Number(match[2]);
+      const year = Number(match[3]);
+      if (first <= 12) {
+        return isoFromParts(year, first, second);
+      }
+      return isoFromParts(year, second, first);
+    }
+
+    if (/^\d{5}(\.\d+)?$/.test(text)) {
+      const parsed = XLSX.SSF.parse_date_code(Number(text), { date1904: Boolean(date1904) });
+      if (parsed && parsed.y && parsed.m && parsed.d) {
+        return isoFromParts(parsed.y, parsed.m, parsed.d);
+      }
+    }
+
+    return "";
+  }
+
+  function normalizeImportStatus(value) {
+    const raw = cleanText(value, 30);
+    const normalized = normalizeImportText(raw);
+
+    if (!normalized) {
+      return {
+        status: "applied",
+        warning: "状态为空，已按“已投递”导入"
+      };
+    }
+
+    const matched = Object.keys(IMPORT_STATUS_ALIASES).find((key) =>
+      IMPORT_STATUS_ALIASES[key].map(normalizeImportText).includes(normalized)
+    );
+
+    if (matched) return { status: matched, warning: "" };
+
+    return {
+      error:
+        "无法识别状态“" +
+        raw +
+        "”，可选：已投递、筛选中、笔试、面试中、已获 Offer、未通过"
+    };
+  }
+
+  function normalizeImportChannel(value) {
+    const raw = cleanText(value, 40);
+    if (!raw) return { channel: "官网投递", warning: "" };
+
+    const normalized = normalizeImportText(raw);
+    const direct = CHANNELS.find((channel) => normalizeImportText(channel) === normalized);
+    if (direct) return { channel: direct, warning: "" };
+
+    for (let index = 0; index < IMPORT_CHANNEL_ALIASES.length; index += 1) {
+      const item = IMPORT_CHANNEL_ALIASES[index];
+      const aliases = item.aliases.map(normalizeImportText);
+      if (aliases.includes(normalized) || aliases.some((alias) => normalized.includes(alias))) {
+        return { channel: item.value, warning: "" };
+      }
+    }
+
+    return {
+      channel: "其他",
+      warning: "渠道“" + raw + "”无法识别，已归入“其他”"
+    };
+  }
+
+  function importFingerprint(company, position, appliedAt) {
+    return [
+      cleanText(company, 60).toLowerCase(),
+      cleanText(position, 80).toLowerCase(),
+      appliedAt
+    ].join("|");
+  }
+
+  function existingApplicationKeys() {
+    return new Set(
+      state.applications.map((application) =>
+        importFingerprint(application.company, application.position, application.appliedAt)
+      )
+    );
+  }
+
+  function parseImportSheet(rows, XLSX, date1904, existingKeys) {
+    const header = detectImportHeader(rows);
+    if (!header) return null;
+
+    const mapping = header.mapping;
+    const records = [];
+    const seenKeys = new Set();
+
+    function cell(row, field) {
+      const index = mapping[field];
+      return index == null ? "" : row[index];
+    }
+
+    for (let rowIndex = header.rowIndex + 1; rowIndex < rows.length; rowIndex += 1) {
+      const row = rows[rowIndex] || [];
+      const rawCompany = cell(row, "company");
+      const rawPosition = cell(row, "position");
+      const rawDate = cell(row, "appliedAt");
+      const rawStatus = cell(row, "status");
+      const rawChannel = cell(row, "channel");
+      const rawLocation = cell(row, "location");
+      const rawNotes = cell(row, "notes");
+
+      const hasData = [rawCompany, rawPosition, rawDate].some(
+        (value) => String(value == null ? "" : value).trim() !== ""
+      );
+      const allMappedBlank = IMPORT_COLUMNS.every((column) => {
+        if (mapping[column.key] == null) return true;
+        return String(row[mapping[column.key]] == null ? "" : row[mapping[column.key]]).trim() === "";
+      });
+      if (!hasData || allMappedBlank) continue;
+
+      if (records.length >= IMPORT_MAX_ROWS) {
+        throw importUserError(
+          "表格中的数据超过 " + IMPORT_MAX_ROWS + " 行，请分批导入。"
+        );
+      }
+
+      const company = cleanText(rawCompany, 60);
+      const position = cleanText(rawPosition, 80);
+      const appliedAt = parseImportDate(rawDate, XLSX, date1904);
+      const statusResult = normalizeImportStatus(rawStatus);
+      const channelResult = normalizeImportChannel(rawChannel);
+      const location = cleanText(rawLocation, 40);
+      const notes = cleanNotes(rawNotes);
+      const errors = [];
+      const warnings = [];
+
+      if (!company) errors.push("企业名称为空");
+      if (!position) errors.push("岗位为空");
+      if (!appliedAt) errors.push("投递时间无法识别");
+      if (statusResult.error) errors.push(statusResult.error);
+      if (statusResult.warning) warnings.push(statusResult.warning);
+      if (channelResult.warning) warnings.push(channelResult.warning);
+      if (String(rawCompany || "").trim().length > 60) warnings.push("企业名称超过 60 字，已截断");
+      if (String(rawPosition || "").trim().length > 80) warnings.push("岗位超过 80 字，已截断");
+
+      let duplicate = null;
+      if (errors.length === 0) {
+        const key = importFingerprint(company, position, appliedAt);
+        if (existingKeys.has(key)) {
+          duplicate = "existing";
+        } else if (seenKeys.has(key)) {
+          duplicate = "file";
+        }
+        seenKeys.add(key);
+      }
+
+      records.push({
+        rowNumber: rowIndex + 1,
+        company,
+        position,
+        appliedAt,
+        rawDate: String(rawDate == null ? "" : rawDate),
+        status: statusResult.status || "applied",
+        channel: channelResult.channel,
+        location,
+        notes,
+        errors,
+        warnings,
+        duplicate
+      });
+    }
+
+    return {
+      records,
+      headerRow: header.rowIndex + 1,
+      missingStatusColumn: mapping.status == null,
+      missingChannelColumn: mapping.channel == null
+    };
+  }
+
+  function showImportError(message) {
+    refs.importLoading.hidden = true;
+    refs.importResult.hidden = true;
+    refs.excelDropzone.hidden = false;
+    refs.importError.hidden = false;
+    refs.importError.innerHTML =
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>' +
+      "<span>" +
+      escapeHtml(message) +
+      "</span>";
+    refs.confirmImport.disabled = true;
+    refs.confirmImport.textContent = "导入 0 条";
+  }
+
+  function clearImportError() {
+    refs.importError.hidden = true;
+    refs.importError.textContent = "";
+  }
+
+  async function parseExcelFile(file) {
+    clearImportError();
+    if (!file) return;
+
+    const extension = String(file.name || "").split(".").pop().toLowerCase();
+    if (!["xlsx", "xls", "csv"].includes(extension)) {
+      showImportError("请选择 .xlsx、.xls 或 .csv 格式的表格文件。");
+      return;
+    }
+    if (file.size > IMPORT_MAX_FILE_SIZE) {
+      showImportError("文件超过 8 MB，请删除无关工作表或分批导入。");
+      return;
+    }
+
+    const token = importState.parseToken + 1;
+    importState.parseToken = token;
+    importState.rows = [];
+    importState.fileName = file.name;
+    importState.sheetName = "";
+    importState.fileSize = file.size;
+    refs.excelDropzone.hidden = true;
+    refs.importResult.hidden = true;
+    refs.importLoading.hidden = false;
+    refs.confirmImport.disabled = true;
+    refs.confirmImport.textContent = "导入 0 条";
+
+    try {
+      const XLSX = await loadXlsxLibrary();
+      if (token !== importState.parseToken) return;
+      const buffer = await file.arrayBuffer();
+      if (token !== importState.parseToken) return;
+
+      const workbook = XLSX.read(new Uint8Array(buffer), {
+        type: "array",
+        cellDates: false,
+        dense: false
+      });
+      const date1904 = Boolean(
+        workbook.Workbook &&
+          workbook.Workbook.WBProps &&
+          workbook.Workbook.WBProps.date1904
+      );
+      const existingKeys = existingApplicationKeys();
+      let parsed = null;
+
+      for (let index = 0; index < workbook.SheetNames.length; index += 1) {
+        const sheetName = workbook.SheetNames[index];
+        const sheet = workbook.Sheets[sheetName];
+        if (!sheet) continue;
+        const rows = XLSX.utils.sheet_to_json(sheet, {
+          header: 1,
+          raw: true,
+          defval: "",
+          blankrows: true
+        });
+        const result = parseImportSheet(rows, XLSX, date1904, existingKeys);
+        if (result) {
+          parsed = Object.assign({}, result, { sheetName: sheetName });
+          break;
+        }
+      }
+
+      if (!parsed) {
+        throw importUserError(
+          "没有找到可识别的字段。请确认表格包含“企业”“岗位”“投递时间”三列，或先下载导入模板。"
+        );
+      }
+      if (parsed.records.length === 0) {
+        throw importUserError("表头识别成功，但没有找到可导入的数据行。");
+      }
+
+      if (token !== importState.parseToken) return;
+
+      importState.rows = parsed.records;
+      importState.sheetName = parsed.sheetName;
+      importState.skipDuplicates = true;
+      refs.importSkipDuplicates.checked = true;
+      refs.importLoading.hidden = true;
+      refs.excelDropzone.hidden = true;
+      refs.importResult.hidden = false;
+      refs.importFileName.textContent = file.name;
+      refs.importFileMeta.textContent =
+        "工作表：" +
+        parsed.sheetName +
+        " · " +
+        parsed.records.length +
+        " 行 · " +
+        formatFileSize(file.size);
+      renderImportResult();
+    } catch (error) {
+      if (token !== importState.parseToken) return;
+      const message =
+        error && error.isUserFacing
+          ? error.message
+          : "Excel 解析失败，请确认文件未损坏、未加密，并包含可识别的字段。";
+      showImportError(message);
+    } finally {
+      if (token === importState.parseToken) refs.importLoading.hidden = true;
+    }
+  }
+
+  function getSelectedImportRows() {
+    const valid = importState.rows.filter((row) => row.errors.length === 0);
+    if (!importState.skipDuplicates) return valid;
+    return valid.filter((row) => !row.duplicate);
+  }
+
+  function importRowResult(row) {
+    if (row.errors.length > 0) {
+      return {
+        className: "is-error",
+        label: "待修正",
+        detail: row.errors.join("；")
+      };
+    }
+    if (row.duplicate) {
+      const suffix =
+        row.duplicate === "existing" ? "已有相同记录" : "表中出现重复";
+      return importState.skipDuplicates
+        ? { className: "is-duplicate", label: "重复 · 跳过", detail: suffix }
+        : { className: "is-duplicate", label: "重复 · 导入", detail: suffix };
+    }
+    if (row.warnings.length > 0) {
+      return {
+        className: "is-warning",
+        label: "可导入",
+        detail: row.warnings.join("；")
+      };
+    }
+    return { className: "is-ok", label: "可导入", detail: "" };
+  }
+
+  function renderImportResult() {
+    if (!importState.rows.length) return;
+
+    const valid = importState.rows.filter((row) => row.errors.length === 0);
+    const invalid = importState.rows.filter((row) => row.errors.length > 0);
+    const duplicateCount = valid.filter((row) => row.duplicate).length;
+    const selected = getSelectedImportRows();
+    const previewRows = importState.rows.slice(0, IMPORT_PREVIEW_LIMIT);
+
+    refs.importSummary.innerHTML = [
+      '<span class="import-stat is-valid"><strong>' + selected.length + "</strong> 条可导入</span>",
+      duplicateCount
+        ? '<span class="import-stat is-duplicate"><strong>' + duplicateCount + "</strong> 条重复</span>"
+        : "",
+      invalid.length
+        ? '<span class="import-stat is-error"><strong>' + invalid.length + "</strong> 行待修正</span>"
+        : ""
+    ].join("");
+
+    refs.importPreviewNote.textContent =
+      importState.rows.length > IMPORT_PREVIEW_LIMIT
+        ? "共 " + importState.rows.length + " 行，仅展示前 " + IMPORT_PREVIEW_LIMIT + " 行；导入将处理全部有效行"
+        : "共 " + importState.rows.length + " 行";
+
+    refs.importPreviewBody.innerHTML = previewRows
+      .map((row) => {
+        const result = importRowResult(row);
+        const status = getStatus(row.status);
+        return [
+          '<tr class="' + (row.errors.length ? "is-invalid-row" : "") + '">',
+          '<td class="col-row">' + row.rowNumber + "</td>",
+          '<td class="col-company" title="' + escapeHtml(row.company) + '">',
+          '  <span class="import-company-name">' + (escapeHtml(row.company) || "—") + "</span>",
+          '  <span class="import-mobile-meta">',
+          '    <span class="import-mobile-position">' + (escapeHtml(row.position) || "—") + "</span>",
+          '    <span class="import-status status-' + status.key + '">' + escapeHtml(status.label) + "</span>",
+          "  </span>",
+          "</td>",
+          '<td class="col-position" title="' + escapeHtml(row.position) + '">' + (escapeHtml(row.position) || "—") + "</td>",
+          '<td class="col-date import-date">' + (row.appliedAt ? formatShortDate(row.appliedAt) : escapeHtml(row.rawDate) || "—") + "</td>",
+          '<td class="col-status"><span class="import-status status-' + status.key + '">' + escapeHtml(status.label) + "</span></td>",
+          '<td class="col-validation import-validation"><span class="import-row-status ' + result.className + '">' +
+            escapeHtml(result.label) + "</span>" +
+            (result.detail ? '<span class="import-row-detail" title="' + escapeHtml(result.detail) + '">' +
+              escapeHtml(result.detail) + "</span>" : "") +
+            "</td>",
+          "</tr>"
+        ].join("");
+      })
+      .join("");
+
+    refs.importSkipDuplicates.disabled = duplicateCount === 0;
+    refs.importSkipDuplicates.parentElement.hidden = duplicateCount === 0;
+    refs.importSkipDuplicates.parentElement.classList.toggle(
+      "is-disabled",
+      duplicateCount === 0
+    );
+
+    refs.confirmImport.disabled = selected.length === 0;
+    refs.confirmImport.textContent =
+      selected.length === 0 ? "没有可导入数据" : "导入 " + selected.length + " 条";
+  }
+
+  function resetImportDialog() {
+    importState.parseToken += 1;
+    importState.rows = [];
+    importState.fileName = "";
+    importState.sheetName = "";
+    importState.fileSize = 0;
+    importState.skipDuplicates = true;
+    refs.excelFile.value = "";
+    refs.excelDropzone.hidden = false;
+    refs.importLoading.hidden = true;
+    refs.importResult.hidden = true;
+    refs.importError.hidden = true;
+    refs.importError.textContent = "";
+    refs.importSummary.innerHTML = "";
+    refs.importPreviewBody.innerHTML = "";
+    refs.importPreviewNote.textContent = "";
+    refs.importSkipDuplicates.checked = true;
+    refs.importSkipDuplicates.disabled = false;
+    refs.importSkipDuplicates.parentElement.hidden = false;
+    refs.confirmImport.disabled = true;
+    refs.confirmImport.textContent = "导入 0 条";
+  }
+
+  function openImportDialog() {
+    resetImportDialog();
+    if (typeof refs.importDialog.showModal === "function") {
+      refs.importDialog.showModal();
+    } else {
+      refs.importDialog.setAttribute("open", "");
+    }
+    document.body.classList.add("is-dialog-open");
+    window.setTimeout(() => {
+      const chooseButton = document.getElementById("choose-excel");
+      if (chooseButton) chooseButton.focus();
+    }, 50);
+  }
+
+  function closeImportDialog() {
+    if (refs.importDialog.open) {
+      refs.importDialog.close();
+    } else {
+      refs.importDialog.removeAttribute("open");
+    }
+  }
+
+  function confirmExcelImport() {
+    const selected = getSelectedImportRows();
+    if (selected.length === 0) {
+      showToast("没有可导入的数据，请检查表格内容。", "error");
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const imported = selected.map((row) =>
+      normalizeApplication({
+        id: uid(),
+        company: row.company,
+        position: row.position,
+        appliedAt: row.appliedAt,
+        status: row.status,
+        channel: row.channel,
+        location: row.location,
+        notes: row.notes,
+        createdAt: now,
+        updatedAt: now
+      })
+    ).filter(Boolean);
+
+    state.applications.push.apply(state.applications, imported);
+    state.filter = "all";
+    state.search = "";
+    refs.search.value = "";
+    saveApplications();
+    closeImportDialog();
+    render();
+    showToast("已从 Excel 导入 " + imported.length + " 条投递记录");
+  }
+
+  function downloadExcelTemplate() {
+    const url = new URL("assets/import-template.xlsx", document.baseURI).href;
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "投递簿-批量导入模板.xlsx";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    showToast("Excel 模板已开始下载");
+  }
+
   /* ---------- Events ---------- */
 
   document.addEventListener("click", function (event) {
     const target = event.target;
     if (!(target instanceof Element)) return;
+
+    const importOpen = target.closest("[data-open-import]");
+    if (importOpen) {
+      openImportDialog();
+      return;
+    }
+
+    const importClose = target.closest("[data-close-import]");
+    if (importClose) {
+      closeImportDialog();
+      return;
+    }
+
+    const templateButton = target.closest("[data-download-template]");
+    if (templateButton) {
+      event.preventDefault();
+      downloadExcelTemplate();
+      return;
+    }
 
     const addButton = target.closest("[data-open-add]");
     if (addButton) {
@@ -1122,6 +1798,8 @@
     if (dataAction) {
       setDataMenu(false);
       const action = dataAction.getAttribute("data-data-action");
+      if (action === "import-excel") openImportDialog();
+      if (action === "download-template") downloadExcelTemplate();
       if (action === "export-csv") exportCsv();
       if (action === "export-json") exportJson();
       if (action === "import-json") refs.importFile.click();
@@ -1205,14 +1883,22 @@
     }
   });
 
-  [refs.applicationDialog, refs.confirmDialog].forEach((dialog) => {
+  refs.importDialog.addEventListener("close", function () {
+    resetImportDialog();
+    if (!document.querySelector("dialog[open]")) {
+      document.body.classList.remove("is-dialog-open");
+    }
+  });
+
+  [refs.applicationDialog, refs.confirmDialog, refs.importDialog].forEach((dialog) => {
     dialog.addEventListener("click", function (event) {
-      if (event.target === dialog) {
-        if (dialog === refs.confirmDialog) {
-          closeConfirmDialog();
-        } else {
-          closeApplicationDialog();
-        }
+      if (event.target !== dialog) return;
+      if (dialog === refs.confirmDialog) {
+        closeConfirmDialog();
+      } else if (dialog === refs.importDialog) {
+        closeImportDialog();
+      } else {
+        closeApplicationDialog();
       }
     });
   });
@@ -1284,6 +1970,51 @@
     const file = refs.importFile.files && refs.importFile.files[0];
     if (file) importJsonFile(file);
   });
+
+  refs.excelDropzone.addEventListener("click", function (event) {
+    if (event.target.closest("[data-download-template]")) return;
+    refs.excelFile.click();
+  });
+
+  refs.excelDropzone.addEventListener("dragover", function (event) {
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    refs.excelDropzone.classList.add("is-dragover");
+  });
+
+  refs.excelDropzone.addEventListener("dragleave", function (event) {
+    if (!refs.excelDropzone.contains(event.relatedTarget)) {
+      refs.excelDropzone.classList.remove("is-dragover");
+    }
+  });
+
+  refs.excelDropzone.addEventListener("drop", function (event) {
+    event.preventDefault();
+    refs.excelDropzone.classList.remove("is-dragover");
+    const file =
+      event.dataTransfer && event.dataTransfer.files
+        ? event.dataTransfer.files[0]
+        : null;
+    if (file) parseExcelFile(file);
+  });
+
+  refs.excelFile.addEventListener("change", function () {
+    const file = refs.excelFile.files && refs.excelFile.files[0];
+    refs.excelFile.value = "";
+    if (file) parseExcelFile(file);
+  });
+
+  refs.importReselect.addEventListener("click", function () {
+    clearImportError();
+    refs.excelFile.click();
+  });
+
+  refs.importSkipDuplicates.addEventListener("change", function () {
+    importState.skipDuplicates = refs.importSkipDuplicates.checked;
+    renderImportResult();
+  });
+
+  refs.confirmImport.addEventListener("click", confirmExcelImport);
 
   window.addEventListener("storage", function (event) {
     if (event.key !== STORAGE_KEY) return;
